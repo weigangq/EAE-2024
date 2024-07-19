@@ -1,0 +1,374 @@
+---
+title: "CRE1"
+author: "Michelle.Franco"
+date: "2024-07-10"
+output: html_document
+---
+Single cell RNA analysis CRE1. This data is of mice that have the knockout and the 1 means beginning of disease or first sign of onset of disease.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Part 1: Data Prep
+##Load libraries
+```{r }
+library(SingleCellExperiment)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+library(gridExtra)
+library(SingleR)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(Seurat)
+library(celldex)
+library(pheatmap)
+library(EnhancedVolcano)
+library(scDblFinder)
+library('beepr')
+set.seed(123)
+```
+#Read data
+```{r}
+cre1 <- Read10X(data.dir = "CRE1/")
+cre1 <- CreateSeuratObject(counts = cre1, project = "cre1",
+                                min.cells = 100, min.features = 200)
+cre1
+```
+#Filter MT:
+```{r}
+cre1 <- PercentageFeatureSet(cre1, pattern = "^mt-", col.name = "percent.mt")
+cre1
+```
+#mitochondrial gene expression analysis
+```{r}
+summary(cre1$percent.mt)
+```
+```{r}
+VlnPlot(cre1, features = "percent.mt", ncol = 1)
+
+```
+```{r}
+total_mito_expss_cre1 <- sum(cre1$percent.mt)
+#print total # of mito expression
+print(paste("Total mitochondrial gene expression: ", total_mito_expss_cre1))
+
+```
+Filter by gene and RNA counts
+```{r}
+VlnPlot(cre1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+cre1 <- subset(cre1, subset = nFeature_RNA < 4000 & nCount_RNA < 20000 & percent.mt < 5)
+cre1
+```
+```{r}
+VlnPlot(cre1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+#preprocessing
+```{r}
+cre1 <- NormalizeData(cre1)
+cre1 <- FindVariableFeatures(cre1)
+cre1 <- ScaleData(cre1)
+cre1 <- RunPCA(cre1)
+cre1 <- FindNeighbors(cre1)
+cre1 <- FindClusters(cre1, resolution = 0.2, cluster.name = "unintegrated_clusters")
+ElbowPlot(cre1) 
+
+```
+```{r}
+saveRDS(cre1, file = "/Users/michellefranco/EAE-summer2024/cre1_preprocessed.rds")
+```
+
+
+#UMAP
+```{r}
+cre1  <- RunUMAP(cre1 , dims = 1:15)
+```
+```{r, results="markup"}
+DimPlot(cre1 , reduction = 'umap', label = TRUE)
+```
+#Remove doublets:
+```{r}
+sce_cre1 <-scDblFinder(GetAssayData(cre1, layer = "counts"), clusters = Idents(cre1))
+cre1@meta.data
+```
+#import the scDblFinder.class from sce object to the Seurat object
+```{r}
+cre1$scDblFinder.class <- sce_cre1$scDblFinder.class
+
+cre1@meta.data
+```
+```{r}
+table(cre1@meta.data$scDblFinder.class)
+```
+```{r}
+print(cre1)
+```
+#visualize doublets and subset
+```{r, results="markup"}
+DimPlot(cre1, reduction = 'umap', split.by = "scDblFinder.class")
+```
+```{r}
+Idents(cre1) <- cre1@meta.data$scDblFinder.class
+VlnPlot(cre1, features = c("nFeature_RNA", "nCount_RNA"), ncol=2)
+```
+##Subset the object
+```{r}
+cre1 <- subset(cre1, idents = "singlet")
+DimPlot(cre1, reduction = 'umap', label = TRUE)
+```
+#Recluster
+```{r}
+cre1 <- NormalizeData(object = cre1)
+cre1 <- FindVariableFeatures(object = cre1)
+cre1 <- ScaleData(object =cre1)
+cre1 <- RunPCA(object = cre1)
+cre1 <- FindNeighbors(object = cre1, dims = 1:15)
+cre1 <- FindClusters(object = cre1, resolution = 0.2, cluster.name =  "unintegrated_clusters")
+cre1 <- RunUMAP(object = cre1, dims = 1:15)
+```
+
+#PCA
+```{r}
+Idents <- "unintegrated_clusters"
+DimPlot(cre1, reduction = 'umap', label = TRUE) + ggtitle("CRE1")
+DimPlot(cre1, reduction = "pca", label = TRUE) 
+
+```
+
+#Single R
+
+```{r}
+ref_cre1 <- celldex::MouseRNAseqData()
+
+```
+#saving counts data into counts_cre1 from counts layer
+```{r}
+counts_cre1 <- GetAssayData(cre1, assay="RNA", layer='counts')
+
+results_cre1<- SingleR(test= counts_cre1, 
+                          ref = ref_cre1, 
+                          labels = ref_cre1$label.fine)
+results_cre1
+```
+#Saving labels
+saving labels seurat object and matching the cell barcodes with that of results
+```{r}
+cre1$singler.labels <- results_cre1$labels[match(rownames(cre1@meta.data), rownames(results_cre1))]
+
+
+DimPlot(cre1, reduction = "umap", group.by = 'singler.labels') + ggtitle ("CRE1")
+
+```
+#Annotation diagnostics
+```{r}
+results_cre1
+results_cre1$scores
+
+
+plotScoreHeatmap(results_cre1)
+```
+
+##comparing to unsupervised clustering
+
+```{r}
+tab_cre1 <- table(Assigned=results_cre1$labels, Clusters=cre1$seurat_clusters)
+tab_cre1
+pheatmap(log10(tab_cre1+10), color = colorRampPalette(c('white','blue'))(10))
+
+```
+#remove cells
+removing cardiomyocytes, erythrocytes, hepatocytes, adipocytes and fibroblasts. these cells should not be in spinal cord tissue
+
+```{r}
+ref_cre1 <-ref_cre1[,grepl('qNSCs|NPCS|aNSCs|Microglia|Microglia activated|Macrophages|Dendritic cells|Macrophages activated|Granulocytes|Monocytes|NK cells|T cells|B cells|Ependymal|OPCS|Endothelial cells|Oligodendrocytes|Astrocytes|Astrocytes activated|Neurons|Neurons activated',ref_cre1$label.fine)]
+
+unique(ref_cre1$label.fine)
+```
+```{r}
+results_cre1 <- SingleR(test= counts_cre1, 
+                               ref = ref_cre1, 
+                               labels = ref_cre1$label.fine)
+```
+
+```{r}
+cre1$singler.labels <- results_cre1$labels[match(rownames(cre1@meta.data), rownames(results_cre1))]
+DimPlot(cre1, reduction = "umap", group.by = 'singler.labels') + ggtitle("cre1")
+```
+separating by labels to see distribution of each cell type:
+```{r}
+DimPlot(cre1, reduction = "umap", group.by = 'singler.labels', label = FALSE) + 
+  facet_wrap(~ singler.labels) + 
+  ggtitle("cre1")
+```
+```{r, results="markup"}
+plotScoreHeatmap(results_cre1)
+```
+
+#Oligodendorcyte cluster
+
+```{r}
+oligo_cre1 <-subset(cre1,subset = singler.labels == "Oligodendrocytes")
+```
+
+```{r}
+# Normalize, find variable features, scale data, run PCA, find neighbors, cluster, and run UMAP
+oligo_cre1 <- NormalizeData(oligo_cre1)
+oligo_cre1 <- FindVariableFeatures(oligo_cre1)
+oligo_cre1 <- ScaleData(oligo_cre1)
+oligo_cre1 <- RunPCA(oligo_cre1)
+ElbowPlot(oligo_cre1)
+```
+```{r}
+oligo_cre1 <- FindNeighbors(oligo_cre1, dims = 1:15)
+oligo_cre1 <- FindClusters(oligo_cre1, resolution = 0.2)
+oligo_cre1 <- RunUMAP(oligo_cre1, dims = 1:15)
+
+# Plot UMAP
+DimPlot(oligo_cre1, reduction = "umap", label = TRUE)
+
+```
+#DEG
+identify marker genes for oligos
+```{r}
+oligo_markers_cre1 <- FindAllMarkers(oligo_cre1, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+```
+
+```{r}
+deg_results_cre1 <- list()
+
+# List of unique clusters
+clusters_cre1 <- unique(oligo_markers_cre1$cluster)
+
+#loop through each cluster and store top markers in the list
+for (cluster in clusters_cre1) {
+  top_markers_cre1 <- oligo_markers_cre1 %>%
+    filter(cluster == !!cluster) %>%
+    arrange(desc(avg_log2FC)) %>%
+    head(20)
+  
+  deg_results_cre1[[paste0("Cluster ", cluster)]] <- top_markers_cre1
+}
+```
+
+```{r}
+head(deg_results_cre1[["Cluster 0"]])
+
+```
+```{r}
+head(deg_results_cre1[["Cluster 1"]])
+
+```
+```{r}
+head(deg_results_cre1[["Cluster 2"]])
+
+```
+```{r}
+head(deg_results_cre1[["Cluster 3"]])
+
+```
+
+#gene ontology (GO)
+###Bological Processes
+```{r}
+cre1_genes_to_test <- rownames(oligo_markers_cre1[oligo_markers_cre1$avg_log2FC > 0.5,])
+```
+
+```{r}
+cre1_BP_GO_results <- enrichGO(gene = cre1_genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "BP")
+```
+
+```{r}
+as.data.frame(cre1_BP_GO_results)
+```
+```{r}
+fit_cre1 <- plot(barplot(cre1_BP_GO_results, showCategory = 15))
+```
+```{r, results="markup"}
+fit_cre1
+```
+##Molecular function
+```{r}
+MFgenes_to_test_cre1 <- rownames(oligo_markers_cre1[oligo_markers_cre1$avg_log2FC > 0.5,])
+```
+
+```{r}
+cre1_GO_resultsMF <- enrichGO(gene = MFgenes_to_test_cre1, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "MF")
+```
+
+```{r}
+as.data.frame(cre1_GO_resultsMF)
+```
+```{r}
+fitMF_cre1 <- plot(barplot(cre1_GO_resultsMF, showCategory = 15))
+```
+
+```{r, results="markup"}
+fitMF_cre1
+```
+
+##cellular component 
+
+```{r}
+CCgenes_to_test_cre1 <- rownames(oligo_markers_cre1[oligo_markers_cre1$avg_log2FC > 0.5,])
+```
+
+```{r}
+cre1_GO_resultsCC <- enrichGO(gene = CCgenes_to_test_cre1, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "CC")
+```
+
+```{r}
+as.data.frame(cre1_GO_resultsCC)
+```
+
+```{r}
+fitCC_cre1 <- plot(barplot(cre1_GO_resultsCC, showCategory = 15))
+```
+
+```{r, results="markup"}
+fitCC_cre1
+```
+
+
+
+
+#DEG
+```{r eval=FALSE, include=FALSE}
+deResults_cre1 <- FindAllMarkers(cre1,
+                                  only.pos = TRUE,
+                                  min.pct = 0.25, 
+                                  logfc.threshold = 0.25)
+
+head((deResults_cre1), 25)
+```
+
+```{r eval=FALSE, include=FALSE}
+ggplot(deResults_cre1, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) + 
+  theme_minimal() + 
+  labs(x = "avg_log2FC", y = "-Log10 p_val_adj", title = "Volcano Plot") +
+  theme(legend.position = "none") 
+
+```
+```{r eval=FALSE, include=FALSE}
+deResults_cre1$GeneName <- rownames(deResults_cre1)
+
+
+EnhancedVolcano(deResults_cre1,
+                lab = deResults_cre1$GeneName,
+                x = 'avg_log2FC',
+                y = 'p_val_adj')
+
+```
+
+```{r}
+sessionInfo()
+```
+
+```{r}
+saveRDS(cre1, file = "/Users/michellefranco/EAE-summer2024/cre1_analysis.rds")
+beep(8)
+```

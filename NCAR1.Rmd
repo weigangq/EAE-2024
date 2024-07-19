@@ -1,0 +1,379 @@
+---
+title: "NCAR1"
+author: "Michelle.Franco"
+date: "2024-07-10"
+output: html_document
+---
+Single cell RNA analysis NCAR1. This data is of mice that do not carry the transgene. The 1 means beginning of disease or first sign of onset of disease.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part 1. Data prep
+```{r }
+library(SingleCellExperiment)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+library(gridExtra)
+library(SingleR)
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(celldex)
+library(pheatmap)
+library(EnhancedVolcano)
+library(scDblFinder)
+library('beepr')
+set.seed(123)
+```
+#Read data
+```{r}
+ncar1 <- Read10X(data.dir = "NCAR1/")
+ncar1 <- CreateSeuratObject(counts = ncar1, project = "ncar1",
+                                min.cells = 100, min.features = 200)
+ncar1
+```
+#Filter MT:
+```{r}
+ncar1 <- PercentageFeatureSet(ncar1, pattern = "^mt-", col.name = "percent.mt")
+ncar1
+```
+
+#mitochondrial gene expression analysis
+```{r}
+summary(ncar1$percent.mt)
+```
+```{r}
+VlnPlot(ncar1, features = "percent.mt", ncol = 1)
+
+```
+```{r}
+total_mito_expss_ncar1 <- sum(ncar1$percent.mt)
+#print total # of mito expression
+print(paste("Total mitochondrial gene expression: ", total_mito_expss_ncar1))
+
+```
+#subset
+Filter by gene and RNA counts
+```{r}
+VlnPlot(ncar1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+ncar1 <- subset(ncar1, subset = nFeature_RNA < 4000 & nCount_RNA < 20000 & percent.mt < 5)
+ncar1
+```
+```{r}
+VlnPlot(ncar1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+```{r}
+ncar1
+```
+#preprcessing
+```{r}
+ncar1 <- NormalizeData(ncar1)
+ncar1 <- FindVariableFeatures(ncar1)
+ncar1 <- ScaleData(ncar1)
+ncar1 <- RunPCA(ncar1)
+ncar1 <- FindNeighbors(ncar1)
+ncar1 <- FindClusters(ncar1, resolution = 0.2, cluster.name = "unintegrated_clusters")
+ElbowPlot(ncar1) #capturing the most biological representation for cell clustering
+
+```
+#UMAP
+```{r}
+ncar1  <- RunUMAP(ncar1 , dims = 1:15)
+```
+```{r, results="markup"}
+DimPlot(ncar1 , reduction = 'umap', label = TRUE)
+```
+#Remove doublets:
+```{r}
+sce_ncar1 <-scDblFinder(GetAssayData(ncar1, layer = "counts"), clusters = Idents(ncar1))
+ncar1@meta.data
+```
+#import the scDblFinder.class from sce object to the Seurat object
+```{r}
+ncar1$scDblFinder.class <- sce_ncar1$scDblFinder.class
+
+ncar1@meta.data
+```
+```{r}
+table(ncar1@meta.data$scDblFinder.class)
+```
+```{r}
+print(ncar1)
+```
+#visualize doublets and subset
+```{r, results="markup"}
+DimPlot(ncar1, reduction = 'umap', split.by = "scDblFinder.class")
+```
+```{r}
+Idents(ncar1) <- ncar1@meta.data$scDblFinder.class
+VlnPlot(ncar1, features = c("nFeature_RNA", "nCount_RNA"), ncol=2)
+```
+##Subset singlet
+```{r}
+ncar1 <- subset(ncar1, idents = "singlet")
+DimPlot(ncar1, reduction = 'umap', label = TRUE)
+```
+#Recluster
+```{r}
+ncar1 <- NormalizeData(object = ncar1)
+ncar1 <- FindVariableFeatures(object = ncar1)
+ncar1 <- ScaleData(object =ncar1)
+ncar1 <- RunPCA(object = ncar1)
+ncar1 <- FindNeighbors(object = ncar1, dims = 1:15)
+ncar1 <- FindClusters(object = ncar1, resolution = 0.2, cluster.name =  "unintegrated_clusters")
+ncar1 <- RunUMAP(object = ncar1, dims = 1:15)
+
+```
+
+#PCA
+```{r}
+Idents <- "unintegrated_clusters"
+DimPlot(ncar1, reduction = "pca", label = TRUE) 
+DimPlot(ncar1, reduction = 'umap', label = TRUE) + ggtitle("ncar1")
+```
+
+#Single R
+```{r}
+ref_ncar1 <- celldex::MouseRNAseqData()
+
+```
+#saving counts data into counts_ncar1 from counts layer
+```{r}
+counts_ncar1 <- GetAssayData(ncar1, assay="RNA", layer='counts')
+
+results_ncar1<- SingleR(test= counts_ncar1, 
+                          ref = ref_ncar1, 
+                          labels = ref_ncar1$label.fine)
+results_ncar1
+```
+#Saving labels
+saving labels seurat object and matching the cell barcodes with that of results
+```{r}
+ncar1$singler.labels <- results_ncar1$labels[match(rownames(ncar1@meta.data), rownames(results_ncar1))]
+
+
+DimPlot(ncar1, reduction = "umap", group.by = 'singler.labels') + ggtitle("NCAR1")
+
+```
+#Annotation diagnostics
+```{r}
+results_ncar1
+results_ncar1$scores
+
+
+plotScoreHeatmap(results_ncar1)
+```
+##comparing to unsupervised clustering
+
+```{r}
+tab_ncar1 <- table(Assigned=results_ncar1$labels, Clusters=ncar1$seurat_clusters)
+tab_ncar1
+pheatmap(log10(tab_ncar1+10), color = colorRampPalette(c('white','blue'))(10))
+
+```
+
+#remove cells
+removing cardiomyocytes, erythrocytes, hepatocytes, adipocytes and fibroblasts. these cells should not be in spinal cord tissue
+
+```{r}
+ref_ncar1 <-ref_ncar1[,grepl('qNSCs|NPCS|aNSCs|Microglia|Microglia activated|Macrophages|Dendritic cells|Macrophages activated|Granulocytes|Monocytes|NK cells|T cells|B cells|Ependymal|OPCS|Endothelial cells|Oligodendrocytes|Astrocytes|Astrocytes activated|Neurons|Neurons activated',ref_ncar1$label.fine)]
+
+unique(ref_ncar1$label.fine)
+```
+```{r}
+results_ncar1 <- SingleR(test= counts_ncar1, 
+                        ref = ref_ncar1, 
+                        labels = ref_ncar1$label.fine)
+```
+
+```{r}
+ncar1$singler.labels <- results_ncar1$labels[match(rownames(ncar1@meta.data), rownames(results_ncar1))]
+DimPlot(ncar1, reduction = "umap", group.by = 'singler.labels') + ggtitle("ncar1")
+```
+separating by labels to see distribution of each cell type:
+```{r}
+DimPlot(ncar1, reduction = "umap", group.by = 'singler.labels', label = FALSE) + 
+  facet_wrap(~ singler.labels) + 
+  ggtitle("ncar1")
+```
+
+```{r, results="markup"}
+plotScoreHeatmap(results_ncar1)
+beep(2)
+```
+
+#Oligodendorcyte analysis
+
+```{r}
+oligo_ncar1 <-subset(ncar1,subset = singler.labels == "Oligodendrocytes")
+```
+###Processing & Dimplot
+```{r}
+# Normalize, find variable features, scale data, run PCA, find neighbors, cluster, and run UMAP
+oligo_ncar1 <- NormalizeData(oligo_ncar1)
+oligo_ncar1 <- FindVariableFeatures(oligo_ncar1)
+oligo_ncar1 <- ScaleData(oligo_ncar1)
+oligo_ncar1 <- RunPCA(oligo_ncar1)
+ElbowPlot(oligo_ncar1)
+```
+```{r}
+oligo_ncar1 <- FindNeighbors(oligo_ncar1, dims = 1:15)
+oligo_ncar1 <- FindClusters(oligo_ncar1, resolution = 0.2)
+oligo_ncar1 <- RunUMAP(oligo_ncar1, dims = 1:15)
+
+# Plot UMAP
+DimPlot(oligo_ncar1, reduction = "umap", label = TRUE)
+
+```
+#DEG
+identify marker genes for oligos
+```{r}
+oligo_markers_ncar1 <- FindAllMarkers(oligo_ncar1, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+```
+
+```{r}
+deg_results_ncar1 <- list()
+
+# List of unique clusters
+clusters_ncar1 <- unique(oligo_markers_ncar1$cluster)
+
+#loop through each cluster and store top markers in the list
+for (cluster in clusters_ncar1) {
+  top_markers_ncar1 <- oligo_markers_ncar1 %>%
+    filter(cluster == !!cluster) %>%
+    arrange(desc(avg_log2FC)) %>%
+    head(20)
+  
+  deg_results_ncar1[[paste0("Cluster ", cluster)]] <- top_markers_ncar1
+}
+```
+
+###Oligo Clusters
+```{r}
+head(deg_results_ncar1[["Cluster 0"]])
+
+```
+```{r}
+head(deg_results_ncar1[["Cluster 1"]])
+
+```
+```{r}
+head(deg_results_ncar1[["Cluster 2"]])
+
+```
+```{r}
+head(deg_results_ncar1[["Cluster 3"]])
+
+```
+
+#Gene ontology (GO)
+###Biological Processes
+```{r}
+ncar1_genes_to_test <- rownames(oligo_markers_ncar1[oligo_markers_ncar1$avg_log2FC > 0.5,])
+```
+
+```{r}
+ncar1_BP_GO_results <- enrichGO(gene = ncar1_genes_to_test, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "BP")
+```
+
+```{r}
+as.data.frame(ncar1_BP_GO_results)
+```
+```{r}
+fit_ncar1 <- plot(barplot(ncar1_BP_GO_results, showCategory = 15))
+```
+```{r, results="markup"}
+fit_ncar1
+```
+###Molecular function
+```{r}
+MFgenes_to_test_ncar1 <- rownames(oligo_markers_ncar1[oligo_markers_ncar1$avg_log2FC > 0.5,])
+```
+
+```{r}
+ncar1_GO_resultsMF <- enrichGO(gene = MFgenes_to_test_ncar1, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "MF")
+```
+
+```{r}
+as.data.frame(ncar1_GO_resultsMF)
+```
+```{r}
+fitMF_ncar1 <- plot(barplot(ncar1_GO_resultsMF, showCategory = 15))
+```
+```{r, results="markup"}
+fitMF_ncar1
+```
+###cellular component for oligodendrocyte
+
+```{r}
+CCgenes_to_test_ncar1 <- rownames(oligo_markers_ncar1[oligo_markers_ncar1$avg_log2FC > 0.5,])
+```
+
+```{r}
+ncar1_GO_resultsCC <- enrichGO(gene = CCgenes_to_test_ncar1, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "CC")
+```
+
+```{r}
+as.data.frame(ncar1_GO_resultsCC)
+```
+
+```{r}
+fitCC_ncar1 <- plot(barplot(ncar1_GO_resultsCC, showCategory = 15))
+```
+
+```{r, results="markup"}
+fitCC_ncar1
+```
+
+
+
+
+
+
+
+
+#DEG
+```{r eval=FALSE, include=FALSE}
+deResults_ncar1 <- FindAllMarkers(ncar1,
+                                  only.pos = TRUE,
+                                  min.pct = 0.25, 
+                                  logfc.threshold = 0.25)
+
+head((deResults_ncar1),25)
+```
+
+```{r eval=FALSE, include=FALSE}
+ggplot(deResults_ncar1, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) + 
+  theme_minimal() + 
+  labs(x = "avg_log2FC", y = "-Log10 p_val_adj", title = "Volcano Plot") +
+  theme(legend.position = "none") 
+
+```
+```{r eval=FALSE, include=FALSE}
+deResults_ncar1$GeneName <- rownames(deResults_ncar1)
+
+
+EnhancedVolcano(deResults_ncar1,
+                lab = deResults_ncar1$GeneName,
+                x = 'avg_log2FC',
+                y = 'p_val_adj')
+
+```
+```{r}
+ncar1
+```
+
+```{r}
+sessionInfo()
+```
+
+```{r}
+saveRDS(ncar1, file = "/Users/michellefranco/EAE-summer2024/ncar1_preprocessed.rds")
+beep(8)
+```
